@@ -1,0 +1,53 @@
+from openai import OpenAI
+
+client = OpenAI(
+    api_key = "sk-proj-pFBJia8VMf52DB0CNQFjT3BlbkFJf0Z9qio7hDId8ZvjGuCH"
+)
+
+open_file = open("dataset.json", "rb")
+
+data_file = client.files.create(
+    file=open_file,
+    purpose='assistants'
+)
+
+ai_assistant = client.beta.assistants.create(
+    name="Energy stats",
+    instructions="What data points would you want"
+    model="gpt-3.5-turbo",
+    tools=[{"type":"file_search"}]
+)
+
+prompt = input("What data point do you want: ")
+thread = client.beta.threads.create(
+    messages=[
+        {
+            "role":"user",
+            "content": prompt,
+            "attachments":[
+                {"file_id": data_file.id, "tools":[{"type": "file_search"}] }
+            ]
+        }
+    ]
+)
+print("\n############################################")
+print("Thread id: " + thread.id)
+print("Assistant id:" + ai_assistant.id)
+print("############################################\n")
+
+run = client.beta.threads.runs.create_and_poll(
+    thread_id=thread.id,
+    assistant_id=ai_assistant.id
+)
+
+if run.status == 'completed':
+    messages = client.beta.threads.messages.list(
+        thread_id=thread.id
+    )
+    print("user:" + messages.data[1].content[0].text.value)
+    print("Assistant: " + messages.data[0].content[0].text.value)
+
+    print("\n############################################")
+    print("Run id: " + run.id)
+else:
+    print(run.status)
