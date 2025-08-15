@@ -1,10 +1,33 @@
+import json
+import csv
 from openai import OpenAI
 
+
+# Function to convert CSV to JSON
+def csv_to_json(csv_file_path, json_file_path):
+    data = []
+
+    with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
+        csv_reader = csv.DictReader(csv_file)
+        for row in csv_reader:
+            data.append(row)
+
+    with open(json_file_path, mode='w', encoding='utf-8') as json_file:
+        json.dump(data, json_file, indent=4)
+
+
+# Convert CSV to JSON first
+csv_file_path = "dataset.csv"  # Change this to your CSV file path
+json_file_path = "dataset.json"
+csv_to_json(csv_file_path, json_file_path)
+
+# Initialize OpenAI client
 client = OpenAI(
-    api_key = "sk-proj-pFBJia8VMf52DB0CNQFjT3BlbkFJf0Z9qio7hDId8ZvjGuCH"
+    api_key="sk-proj-pFBJia8VMf52DB0CNQFjT3BlbkFJf0Z9qio7hDId8ZvjGuCH"
 )
 
-open_file = open("dataset.json", "rb")
+# Open the converted JSON file
+open_file = open(json_file_path, "rb")
 
 data_file = client.files.create(
     file=open_file,
@@ -12,20 +35,20 @@ data_file = client.files.create(
 )
 
 ai_assistant = client.beta.assistants.create(
-    name="Energy stats",
-    instructions="What data points would you want"
+    name="energy stats",
+    instructions="",
     model="gpt-3.5-turbo",
-    tools=[{"type":"file_search"}]
+    tools=[{"type": "file_search"}]
 )
 
-prompt = input("What data point do you want: ")
+prompt = input("Enter a statistic: ")
 thread = client.beta.threads.create(
     messages=[
         {
-            "role":"user",
+            "role": "user",
             "content": prompt,
-            "attachments":[
-                {"file_id": data_file.id, "tools":[{"type": "file_search"}] }
+            "attachments": [
+                {"file_id": data_file.id, "tools": [{"type": "file_search"}]}
             ]
         }
     ]
