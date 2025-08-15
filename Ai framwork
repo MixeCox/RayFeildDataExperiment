@@ -1,76 +1,235 @@
 import json
 import csv
+import os
+import sys
+from pathlib import Path
+from typing import Optional
 from openai import OpenAI
 
 
-# Function to convert CSV to JSON
-def csv_to_json(csv_file_path, json_file_path):
-    data = []
+class EnergyStatsAssistant:
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize the assistant with OpenAI API key."""
+        self.api_key = api_key or os.getenv('OPENAI_API_KEY')
+        if not self.api_key:
+            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable or pass it directly.")
+        
+        self.client = OpenAI(api_key=self.api_key)
+        self.assistant = None
+        self.data_file = None
 
-    with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
-        csv_reader = csv.DictReader(csv_file)
-        for row in csv_reader:
-            data.append(row)
+    def csv_to_json(self, csv_file_path: str, json_file_path: str) -> bool:
+        """Convert CSV to JSON with error handling."""
+        try:
+            if not Path(csv_file_path).exists():
+                print(f"❌ CSV file not found: {csv_file_path}")
+                return False
 
-    with open(json_file_path, mode='w', encoding='utf-8') as json_file:
-        json.dump(data, json_file, indent=4)
+            data = []
+            with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
+                csv_reader = csv.DictReader(csv_file)
+                for row_num, row in enumerate(csv_reader, 1):
+                    if row:  # Skip empty rows
+                        data.append(row)
+                
+                if not data:
+                    print("❌ CSV file is empty or has no valid data")
+                    return False
+
+            with open(json_file_path, mode='w', encoding='utf-8') as json_file:
+                json.dump(data, json_file, indent=2)
+            
+            print(f"✅ Successfully converted {len(data)} rows to JSON")
+            return True
+
+        except FileNotFoundError:
+            print(f"❌ File not found: {csv_file_path}")
+            return False
+        except PermissionError:
+            print(f"❌ Permission denied accessing file: {csv_file_path}")
+            return False
+        except Exception as e:
+            print(f"❌ Error converting CSV to JSON: {str(e)}")
+            return False
+
+    def upload_data_file(self, json_file_path: str) -> bool:
+        """Upload JSON file to OpenAI with error handling."""
+        try:
+            if not Path(json_file_path).exists():
+                print(f"❌ JSON file not found: {json_file_path}")
+                return False
+
+            with open(json_file_path, "rb") as open_file:
+                self.data_file = self.client.files.create(
+                    file=open_file,
+                    purpose='assistants'
+                )
+            
+            print(f"✅ File uploaded successfully (ID: {self.data_file.id})")
+            return True
+
+        except Exception as e:
+            print(f"❌ Error uploading file: {str(e)}")
+            return False
+
+    def create_assistant(self, name: str = "Energy Stats Assistant") -> bool:
+        """Create OpenAI assistant with error handling."""
+        try:
+            self.assistant = self.client.beta.assistants.create(
+                name=name,
+                instructions="""You are an expert energy data analyst. Help users understand their energy statistics by:
+                1. Providing clear, accurate answers about the data
+                2. Highlighting key insights and trends
+                3. Explaining technical terms in simple language
+                4. Offering actionable recommendations when appropriate""",
+                model="gpt-4o-mini",  # Using newer, more cost-effective model
+                tools=[{"type": "file_search"}]
+            )
+            
+            print(f"✅ Assistant created successfully (ID: {self.assistant.id})")
+            return True
+
+        except Exception as e:
+            print(f"❌ Error creating assistant: {str(e)}")
+            return False
+
+    def query_data(self, prompt: str) -> Optional[str]:
+        """Query the assistant with error handling and better response formatting."""
+        if not self.assistant or not self.data_file:
+            print("❌ Assistant or data file not initialized")
+            return None
+
+        try:
+            # Create thread with the user's question
+            thread = self.client.beta.threads.create(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "attachments": [
+                            {"file_id": self.data_file.id, "tools": [{"type": "file_search"}]}
+                        ]
+                    }
+                ]
+            )
+
+            # Run the assistant
+            run = self.client.beta.threads.runs.create_and_poll(
+                thread_id=thread.id,
+                assistant_id=self.assistant.id,
+                timeout=60  # 60 second timeout
+            )
+
+            if run.status == 'completed':
+                messages = self.client.beta.threads.messages.list(thread_id=thread.id)
+                assistant_response = messages.data[0].content[0].text.value
+                
+                print("\n" + "="*60)
+                print(f"🤖 Assistant Response:")
+                print("="*60)
+                print(assistant_response)
+                print("="*60 + "\n")
+                
+                return assistant_response
+
+            else:
+                print(f"❌ Run failed with status: {run.status}")
+                return None
+
+        except Exception as e:
+            print(f"❌ Error querying assistant: {str(e)}")
+            return None
+
+    def cleanup(self):
+        """Clean up resources."""
+        try:
+            if self.data_file:
+                self.client.files.delete(self.data_file.id)
+                print("✅ Data file cleaned up")
+            if self.assistant:
+                self.client.beta.assistants.delete(self.assistant.id)
+                print("✅ Assistant cleaned up")
+        except Exception as e:
+            print(f"⚠️ Error during cleanup: {str(e)}")
 
 
-# Convert CSV to JSON first
-csv_file_path = "dataset.csv"  # Change this to your CSV file path
-json_file_path = "dataset.json"
-csv_to_json(csv_file_path, json_file_path)
+def main():
+    """Main function with improved user experience."""
+    print("🔋 Energy Stats Assistant")
+    print("=" * 40)
+    
+    # Get file path from user
+    csv_file_path = input("📁 Enter CSV file path (or press Enter for 'dataset.csv'): ").strip()
+    if not csv_file_path:
+        csv_file_path = "dataset.csv"
+    
+    json_file_path = csv_file_path.rsplit('.', 1)[0] + ".json"
+    
+    try:
+        # Initialize assistant
+        assistant = EnergyStatsAssistant()
+        
+        # Convert CSV to JSON
+        print(f"\n📊 Converting {csv_file_path} to JSON...")
+        if not assistant.csv_to_json(csv_file_path, json_file_path):
+            return
+        
+        # Upload data file
+        print("📤 Uploading data to OpenAI...")
+        if not assistant.upload_data_file(json_file_path):
+            return
+        
+        # Create assistant
+        print("🤖 Creating AI assistant...")
+        if not assistant.create_assistant():
+            return
+        
+        print("\n✨ Setup complete! You can now ask questions about your energy data.")
+        print("💡 Try questions like:")
+        print("   • What's the average energy consumption?")
+        print("   • Show me the highest usage periods")
+        print("   • What trends do you see in the data?")
+        print("   • Type 'quit' to exit\n")
+        
+        # Interactive query loop
+        while True:
+            try:
+                prompt = input("❓ Your question: ").strip()
+                
+                if prompt.lower() in ['quit', 'exit', 'q']:
+                    break
+                
+                if not prompt:
+                    print("⚠️ Please enter a question")
+                    continue
+                
+                print("🔍 Analyzing your data...")
+                assistant.query_data(prompt)
+                
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye!")
+                break
+    
+    except ValueError as e:
+        print(f"❌ Configuration error: {e}")
+        print("💡 Set your OpenAI API key as an environment variable:")
+        print("   export OPENAI_API_KEY='your-api-key-here'")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+    finally:
+        # Cleanup
+        if 'assistant' in locals():
+            print("\n🧹 Cleaning up...")
+            assistant.cleanup()
+        
+        # Clean up local JSON file
+        try:
+            if Path(json_file_path).exists():
+                os.remove(json_file_path)
+                print("✅ Local JSON file cleaned up")
+        except Exception as e:
+            print(f"⚠️ Could not remove JSON file: {e}")
 
-# Initialize OpenAI client
-client = OpenAI(
-    api_key="sk-proj-pFBJia8VMf52DB0CNQFjT3BlbkFJf0Z9qio7hDId8ZvjGuCH"
-)
 
-# Open the converted JSON file
-open_file = open(json_file_path, "rb")
-
-data_file = client.files.create(
-    file=open_file,
-    purpose='assistants'
-)
-
-ai_assistant = client.beta.assistants.create(
-    name="energy stats",
-    instructions="",
-    model="gpt-3.5-turbo",
-    tools=[{"type": "file_search"}]
-)
-
-prompt = input("Enter a statistic: ")
-thread = client.beta.threads.create(
-    messages=[
-        {
-            "role": "user",
-            "content": prompt,
-            "attachments": [
-                {"file_id": data_file.id, "tools": [{"type": "file_search"}]}
-            ]
-        }
-    ]
-)
-print("\n############################################")
-print("Thread id: " + thread.id)
-print("Assistant id:" + ai_assistant.id)
-print("############################################\n")
-
-run = client.beta.threads.runs.create_and_poll(
-    thread_id=thread.id,
-    assistant_id=ai_assistant.id
-)
-
-if run.status == 'completed':
-    messages = client.beta.threads.messages.list(
-        thread_id=thread.id
-    )
-    print("user:" + messages.data[1].content[0].text.value)
-    print("Assistant: " + messages.data[0].content[0].text.value)
-
-    print("\n############################################")
-    print("Run id: " + run.id)
-else:
-    print(run.status)
+if __name__ == "__main__":
+    main()
