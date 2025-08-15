@@ -11,7 +11,7 @@ import secrets
 import json
 import uuid # For generating unique IDs for image caching
 
-from flask import Flask, render_template_string, request, redirect, url_for, session, send_file
+from flask import Flask, render_template_string, request, redirect, url_for, session, send_file, jsonify
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -39,7 +39,6 @@ def train_model(df):
     Mock AI model training. In a real scenario, this would train a complex ML model.
     Here, it calculates mean and std dev for Z-score anomaly detection.
     """
-    # FIX: Corrected the column name from 'output_output_kwh' to 'output_kwh'
     mean_output = df['output_kwh'].mean()
     std_output = df['output_kwh'].std()
     return {'mean': mean_output, 'std': std_output}
@@ -149,7 +148,6 @@ mock_analytics = {
     ]
 }
 
-
 # --- Flask Routes ---
 @app.route('/', methods=['GET'])
 def home():
@@ -166,10 +164,10 @@ def login():
 def upload():
     if request.method == 'POST':
         if 'csv_file' not in request.files:
-            return "No file part", 400
+            return jsonify({'error': 'No file part'}), 400
         file = request.files['csv_file']
         if file.filename == '':
-            return "No selected file", 400
+            return jsonify({'error': 'No selected file'}), 400
         if file and allowed_file(file.filename):
             try:
                 # Read CSV directly from stream
@@ -180,7 +178,7 @@ def upload():
                 required_solar_cols = {'Timestamp', 'SolarGeneration'}
                 if not required_solar_cols.issubset(df.columns):
                     missing = required_solar_cols - set(df.columns)
-                    return f"Missing required columns in CSV: {', '.join(missing)}. Please ensure 'Timestamp' and 'SolarGeneration' are present.", 400
+                    return jsonify({'error': f"Missing required columns in CSV: {', '.join(missing)}. Please ensure 'Timestamp' and 'SolarGeneration' are present."}), 400
 
                 df = df.dropna(subset=["SolarGeneration", "Timestamp"]).copy()
                 df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors='coerce') 
@@ -273,14 +271,14 @@ def upload():
                     'anomalies': formatted_anomalies
                 }
                 
-                return redirect(url_for('dashboard'))
+                return jsonify({'redirect': url_for('dashboard')})
 
             except Exception as e:
                 # Log the exception for debugging
                 app.logger.error(f"Error processing file: {e}")
-                return f"Error processing file: {e}", 500
+                return jsonify({'error': f"Error processing file: {e}"}), 500
         else:
-            return "Invalid file type. Please upload a CSV file.", 400
+            return jsonify({'error': 'Invalid file type. Please upload a CSV file.'}), 400
     
     return render_template_string(upload_template, name="Sarah Johnson")
 
@@ -344,7 +342,6 @@ def dashboard():
             'WindSpeed', 'Wind Speed (m/s)'
         )
 
-
     return render_template_string(
         dashboard_template, 
         name="Sarah Johnson",
@@ -363,7 +360,6 @@ def logout():
         session.pop('processed_data_keys', None) 
     return redirect(url_for('login'))
 
-# --- Add an Export Dashboard route and button ---
 @app.route('/export', methods=['GET'])
 def export_dashboard():
     # Show a page with a download button for dashboard visuals
@@ -612,6 +608,7 @@ upload_template = '''
             padding: 30px; 
             border-radius: 0 0 12px 12px; 
             min-height: 400px; 
+            position: relative; 
         }
         .page-title { 
             color: #2c3e50; 
@@ -669,7 +666,7 @@ upload_template = '''
             color: white; 
             border: none; 
             border-radius: 6px; 
-            font-size: 16px; 
+            font-size:16px; 
             font-weight: 500; 
             cursor: pointer; 
             transition: all 0.3s; 
@@ -677,6 +674,12 @@ upload_template = '''
         .btn:hover { 
             transform: translateY(-2px); 
             box-shadow: 0 4px 15px rgba(0, 176, 155, 0.3); 
+        }
+        .btn:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
         }
         .footer { 
             text-align: center; 
@@ -695,7 +698,84 @@ upload_template = '''
             font-size: 14px;
             font-weight: 500;
         }
+        .loading-overlay {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            border-radius: 0 0 12px 12px;
+        }
+        .loading-spinner {
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #00b09b;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+        }
+        .loading-text {
+            margin-top: 15px;
+            font-size: 16px;
+            color: #2c3e50;
+            font-weight: 500;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.querySelector('#uploadForm');
+            const loadingOverlay = document.querySelector('.loading-overlay');
+            const uploadBtn = document.querySelector('#uploadBtn');
+            const fileInput = document.querySelector('input[name="csv_file"]');
+
+            form.addEventListener('submit', async function(event) {
+                event.preventDefault();
+                
+                // Validate file selection
+                if (!fileInput.files.length) {
+                    alert('Please select a CSV file to upload.');
+                    return;
+                }
+
+                // Show loading screen and disable button
+                loadingOverlay.style.display = 'flex';
+                uploadBtn.disabled = true;
+
+                try {
+                    const formData = new FormData(form);
+                    const response = await fetch('{{ url_for("upload") }}', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok && result.redirect) {
+                        window.location.href = result.redirect;
+                    } else {
+                        // Hide loading screen and re-enable button on error
+                        loadingOverlay.style.display = 'none';
+                        uploadBtn.disabled = false;
+                        alert(result.error || 'An error occurred during upload.');
+                    }
+                } catch (error) {
+                    // Handle network or other errors
+                    loadingOverlay.style.display = 'none';
+                    uploadBtn.disabled = false;
+                    alert('Upload failed: ' + error.message);
+                }
+            });
+        });
+    </script>
 </head>
 <body>
     <div class="container">
@@ -733,11 +813,11 @@ upload_template = '''
                 <h2>Upload Your Energy Data CSV</h2>
                 <p>Analyze energy production, efficiency, and detect anomalies</p>
                 
-                <form method="POST" enctype="multipart/form-data" style="margin-top: 30px;">
+                <form id="uploadForm" enctype="multipart/form-data" style="margin-top: 30px;">
                     <div class="form-group">
                         <input type="file" name="csv_file" accept=".csv" required>
                     </div>
-                    <button type="submit" class="btn">Upload & Analyze</button>
+                    <button type="submit" id="uploadBtn" class="btn">Upload & Analyze</button>
                 </form>
             </div>
             
@@ -749,6 +829,13 @@ upload_template = '''
                     <li>Timestamp format for <code>Timestamp</code> column: YYYY-MM-DD HH:MM:SS</li>
                     <li>Maximum file size: 10MB</li>
                 </ul>
+            </div>
+
+            <div class="loading-overlay">
+                <div style="text-align: center;">
+                    <div class="loading-spinner"></div>
+                    <div class="loading-text">Processing your data...</div>
+                </div>
             </div>
         </div>
         
@@ -884,14 +971,14 @@ dashboard_template = '''
         .chart-container { 
             height: 350px; 
             width: 100%; 
-            display: flex; /* Use flexbox to center image */
+            display: flex; 
             justify-content: center;
             align-items: center;
         }
         .chart-container img {
-            max-width: 100%; /* Ensure image fits within container */
+            max-width: 100%; 
             max-height: 100%;
-            object-fit: contain; /* Maintain aspect ratio */
+            object-fit: contain; 
         }
         .stats-grid { 
             display: grid; 
