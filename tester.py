@@ -11,7 +11,7 @@ import secrets
 import json
 import uuid # For generating unique IDs for image caching
 
-from flask import Flask, render_template_string, request, redirect, url_for, session
+from flask import Flask, render_template_string, request, redirect, url_for, session, send_file
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -305,7 +305,7 @@ def dashboard():
         retrieved_plots = {}
         for plot_name, plot_id in processed_data_keys['plot_ids'].items():
             if plot_id in plot_image_cache:
-                retrieved_plots[plot_name] = plot_image_cache.pop(plot_id) # Pop to clear cache after use
+                retrieved_plots[plot_name] = plot_image_cache[plot_id] # Do NOT pop here
         
         analytics_to_display = {
             'stats': processed_data_keys['stats'],
@@ -316,8 +316,6 @@ def dashboard():
             'wind_dual_axis_plot': retrieved_plots.get('wind_dual_axis_plot'),
         }
         summary_text = processed_data_keys['summary']
-        # Clear session keys after use (optional, but good for single-upload apps)
-        session.pop('processed_data_keys', None) 
     else:
         # Generate mock plots dynamically for initial display if no data uploaded
         mock_df_plot = pd.DataFrame({
@@ -364,6 +362,41 @@ def logout():
             plot_image_cache.pop(plot_id, None) # Remove from cache if still there
         session.pop('processed_data_keys', None) 
     return redirect(url_for('login'))
+
+# --- Add an Export Dashboard route and button ---
+@app.route('/export', methods=['GET'])
+def export_dashboard():
+    # Show a page with a download button for dashboard visuals
+    processed_data_keys = session.get('processed_data_keys', None)
+    has_data = processed_data_keys is not None and bool(processed_data_keys.get('plot_ids', {}))
+    return render_template_string(export_template, has_data=has_data)
+
+@app.route('/download_visuals', methods=['GET'])
+def download_visuals():
+    # Export all dashboard images as a zip file
+    import zipfile
+    from flask import send_file
+    from io import BytesIO
+
+    processed_data_keys = session.get('processed_data_keys', None)
+    if not processed_data_keys or not processed_data_keys.get('plot_ids', {}):
+        return "No dashboard data to export. Please upload and analyze data first.", 400
+
+    # Collect images from cache
+    image_files = []
+    for plot_name, plot_id in processed_data_keys['plot_ids'].items():
+        img_data = plot_image_cache.get(plot_id)
+        if img_data:
+            img_bytes = base64.b64decode(img_data)
+            image_files.append((f"{plot_name}.png", img_bytes))
+
+    # Create zip in memory
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w') as zf:
+        for fname, fbytes in image_files:
+            zf.writestr(fname, fbytes)
+    zip_buffer.seek(0)
+    return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='dashboard_visuals.zip')
 
 # HTML Templates as strings
 login_template = '''
@@ -683,8 +716,8 @@ upload_template = '''
         <div class="nav">
             <a href="{{ url_for('dashboard') }}">Dashboard</a>
             <a href="{{ url_for('upload') }}" class="active">Upload Data</a>
+            <a href="{{ url_for('export_dashboard') }}">Export</a>
             <a href="#">Reports</a>
-            <a href="#">Settings</a>
             <a href="{{ url_for('logout') }}" style="margin-left: auto;">Logout</a>
         </div>
         
@@ -958,8 +991,8 @@ dashboard_template = '''
         <div class="nav">
             <a href="{{ url_for('dashboard') }}" class="active">Dashboard</a>
             <a href="{{ url_for('upload') }}">Upload Data</a>
+            <a href="{{ url_for('export_dashboard') }}">Export</a>
             <a href="#">Reports</a>
-            <a href="#">Settings</a>
             <a href="{{ url_for('logout') }}" style="margin-left: auto;">Logout</a>
         </div>
         
@@ -970,7 +1003,10 @@ dashboard_template = '''
             
             <div class="page-title">
                 <h2>Energy Production Dashboard</h2>
-                <a href="{{ url_for('upload') }}" class="btn">Upload New Data</a>
+                <div>
+                    <a href="{{ url_for('upload') }}" class="btn">Upload New Data</a>
+                    <a href="{{ url_for('export_dashboard') }}" class="btn" style="margin-left: 10px;">Export Dashboard</a>
+                </div>
             </div>
 
             <div class="summary-box">
@@ -1080,6 +1116,64 @@ dashboard_template = '''
             </div>
         </div>
         
+        <div class="footer">
+            &copy; 2023 Rayfield Systems. All rights reserved. | AI-powered Energy Automation
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+export_template = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Export Dashboard Visuals | Rayfield Systems</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Roboto', sans-serif; background: linear-gradient(135deg, #1a2a6c, #2c3e50); min-height: 100vh; padding: 20px; }
+        .container { max-width: 700px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); padding: 40px; }
+        .header { background: linear-gradient(90deg, #00b09b, #96c93d); color: white; padding: 20px; border-radius: 12px 12px 0 0; margin-bottom: 30px; }
+        .nav { background-color: #2c3e50; padding: 0 20px; display: flex; margin-bottom: 30px; }
+        .nav a { color: white; text-decoration: none; padding: 15px 20px; display: block; transition: background 0.3s; }
+        .nav a:hover { background-color: #1a2a6c; }
+        .nav a.active { background: linear-gradient(90deg, #00b09b, #96c93d); font-weight: 500; }
+        .content { padding: 20px; }
+        .btn { padding: 12px 30px; background: linear-gradient(90deg, #00b09b, #96c93d); color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: 500; cursor: pointer; transition: all 0.3s; text-decoration: none; display: inline-block; margin-top: 20px;}
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(0,176,155,0.3);}
+        .footer { text-align: center; padding: 20px 0; color: #7f8c8d; font-size: 14px; margin-top: 30px; }
+        .demo-note { background-color: #e8f4f3; color: #00b09b; padding: 15px; margin-bottom: 20px; border-radius: 6px; text-align: center; font-size: 14px; font-weight: 500;}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Export Dashboard Visuals</h1>
+            <p>Download all generated dashboard charts as a zip file.</p>
+        </div>
+        <div class="nav">
+            <a href="{{ url_for('dashboard') }}">Dashboard</a>
+            <a href="{{ url_for('upload') }}">Upload Data</a>
+            <a href="{{ url_for('export_dashboard') }}" class="active">Export</a>
+            <a href="#">Reports</a>
+            <a href="{{ url_for('logout') }}" style="margin-left: auto;">Logout</a>
+        </div>
+        <div class="content">
+            <div class="demo-note">
+                {% if has_data %}
+                    Click the button below to download all dashboard visuals as a zip file.
+                {% else %}
+                    No dashboard visuals available. Please upload and analyze data first.
+                {% endif %}
+            </div>
+            {% if has_data %}
+                <a href="{{ url_for('download_visuals') }}" class="btn">Download Dashboard Visuals</a>
+            {% else %}
+                <a href="{{ url_for('upload') }}" class="btn">Upload Data</a>
+            {% endif %}
+        </div>
         <div class="footer">
             &copy; 2023 Rayfield Systems. All rights reserved. | AI-powered Energy Automation
         </div>
