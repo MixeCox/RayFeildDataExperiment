@@ -1,6 +1,6 @@
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg') # Set Matplotlib backend to 'Agg' for non-GUI operation
+matplotlib.use('Agg')  # Set Matplotlib backend to 'Agg' for non-GUI operation
 import matplotlib.pyplot as plt
 import seaborn as sns
 import io
@@ -9,8 +9,8 @@ import numpy as np
 import os
 import secrets
 import json
-import uuid # For generating unique IDs for image caching
-
+import uuid  # For generating unique IDs for image caching
+from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, url_for, session, send_file, jsonify
 
 # Initialize Flask app
@@ -23,39 +23,28 @@ ALLOWED_EXTENSIONS = {'csv'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Global in-memory cache for generated plots (fixes session size issue) ---
-# In a production app, use a more robust caching solution (e.g., Redis, database)
+# Global in-memory cache for generated plots
 plot_image_cache = {}
 
 # --- Helper Functions for Anomaly Detection and Plotting ---
 
 def allowed_file(filename):
     """Checks if the uploaded file has an allowed extension."""
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def train_model(df):
-    """
-    Mock AI model training. In a real scenario, this would train a complex ML model.
-    Here, it calculates mean and std dev for Z-score anomaly detection.
-    """
+    """Mock AI model training using Z-score for anomaly detection."""
     mean_output = df['output_kwh'].mean()
     std_output = df['output_kwh'].std()
     return {'mean': mean_output, 'std': std_output}
 
 def predict_anomalies(model, df, threshold=3.0):
-    """
-    Predicts anomalies based on Z-score.
-    Values with a Z-score magnitude greater than the threshold are considered anomalies.
-    """
+    """Predicts anomalies based on Z-score."""
     mean_output = model['mean']
     std_output = model['std']
-
-    if std_output == 0: # Avoid division by zero if all values are the same
+    if std_output == 0:
         return pd.Series([False] * len(df), index=df.index)
-
     df['z_score'] = (df['output_kwh'] - mean_output) / std_output
-    # Flag as anomaly if absolute z-score exceeds threshold
     df['anomaly'] = np.abs(df['z_score']) > threshold
     return df['anomaly']
 
@@ -63,77 +52,122 @@ def generate_summary(df_hourly):
     """Generates a text summary of the energy analytics."""
     anomalies_df = df_hourly[df_hourly["anomaly"]]
     anomalies_dates = anomalies_df["date"].dt.strftime('%Y-%m-%d %H:%M').tolist()
-    
-    # Limit anomalies displayed to avoid very long strings
     anomalies_display = ", ".join(anomalies_dates[:5])
     if len(anomalies_dates) > 5:
         anomalies_display += f"... ({len(anomalies_dates) - 5} more)"
     elif not anomalies_dates:
         anomalies_display = "None detected."
-
     peak_output = df_hourly["output_kwh"].max()
     avg_output = round(df_hourly["output_kwh"].mean(), 2)
-
     return f"Avg output: {avg_output} kWh. Anomalies detected on: {anomalies_display}. Peak output: {peak_output} kWh."
 
 def generate_plot_base64(df, plot_type, x_col, y_col, title, xlabel, ylabel, second_y_col=None, second_ylabel=None):
     """Generates a Matplotlib plot and returns it as a Base64 encoded string."""
-    # Set a custom style for better aesthetics and readability
     plt.style.use('seaborn-v0_8-darkgrid')
-    
-    # Define a color palette for consistency
     colors = ['#00b09b', '#96c93d', '#1a2a6c', '#2c3e50', '#ff6b6b']
-
     if plot_type == 'dual_axis':
-        fig, ax1 = plt.subplots(figsize=(14, 6)) # Larger figure for dual axis
+        fig, ax1 = plt.subplots(figsize=(14, 6))
         ax2 = ax1.twinx()
-
         ax1.plot(df[x_col], df[y_col], color=colors[0], label=ylabel, linewidth=2)
         ax2.plot(df[x_col], df[second_y_col], color=colors[2], linestyle='--', label=second_ylabel, linewidth=2)
-
         ax1.set_xlabel(xlabel, fontsize=12)
         ax1.set_ylabel(ylabel, color=colors[0], fontsize=12)
         ax2.set_ylabel(second_ylabel, color=colors[2], fontsize=12)
-        
         ax1.tick_params(axis='y', labelcolor=colors[0])
         ax2.tick_params(axis='y', labelcolor=colors[2])
-        ax1.tick_params(axis='x', rotation=45) # Rotate x-axis labels for better readability
-        
+        ax1.tick_params(axis='x', rotation=45)
         plt.title(title, fontsize=14, fontweight='bold')
-        
-        # Add legend to dual axis plot
         lines, labels = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax2.legend(lines + lines2, labels + labels2, loc='upper left', frameon=True, fancybox=True, shadow=True)
-        
         fig.tight_layout()
     else:
-        plt.figure(figsize=(10, 6)) # Adjust figure size for better web display
-        
+        plt.figure(figsize=(10, 6))
         if plot_type == 'line':
             plt.plot(df[x_col], df[y_col], color=colors[0], linewidth=2)
         elif plot_type == 'scatter':
-            # Use appropriate color for humidity plot
             scatter_color = colors[3] if y_col == 'RelativeHumidity' else colors[1]
             sns.scatterplot(data=df, x=x_col, y=y_col, alpha=0.7, color=scatter_color, s=50, edgecolor='w', linewidth=0.5)
-        
         plt.title(title, fontsize=14, fontweight='bold')
         plt.xlabel(xlabel, fontsize=12)
         plt.ylabel(ylabel, fontsize=12)
         plt.grid(True, linestyle='--', alpha=0.7)
-        if x_col == 'date': # Rotate x-axis labels for time series
+        if x_col == 'date':
             plt.xticks(rotation=45)
         plt.tight_layout()
-
-    # Save plot to a BytesIO object
     buffer = io.BytesIO()
-    plt.savefig(buffer, format='png', dpi=150) # Increased DPI for better image quality
+    plt.savefig(buffer, format='png', dpi=150)
     buffer.seek(0)
     plot_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-    plt.close() # Close the plot to free memory
+    plt.close()
     return plot_base64
 
-# --- Mock analytics data for initial display ---
+def generate_report_text(processed_data_keys):
+    """Generates a text-based report summarizing the analytics and visuals."""
+    if not processed_data_keys:
+        return """Energy Analytics Report
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Rayfield Systems - AI-Powered Energy Automation
+
+No data uploaded. Please upload a CSV file with energy production data to generate a detailed report.
+"""
+    stats = processed_data_keys.get('stats', {})
+    anomalies = processed_data_keys.get('anomalies', [])
+    summary = processed_data_keys.get('summary', 'No summary available.')
+    
+    report_lines = [
+        f"Energy Analytics Report",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Rayfield Systems - AI-Powered Energy Automation",
+        "",
+        "Overview",
+        "-------",
+        f"Total Data Points Analyzed: {stats.get('data_points', 0)}",
+        f"Maximum Energy Output: {stats.get('max_output', 0):.1f} kWh",
+        f"Minimum Energy Output: {stats.get('min_output', 0):.1f} kWh",
+        f"Average Energy Output: {stats.get('avg_output', 0):.1f} kWh",
+        f"Total Energy Output: {stats.get('total_output', 0):.1f} kWh",
+        "",
+        "Summary",
+        "-------",
+        summary,
+        "",
+        "Anomaly Detection",
+        "----------------",
+        f"Total Anomalies Detected: {len(anomalies)}",
+    ]
+    
+    if anomalies:
+        report_lines.append("\nDetected Anomalies:")
+        report_lines.append("Timestamp                | Energy Output (kWh) | Z-Score")
+        report_lines.append("-" * 50)
+        for anomaly in anomalies[:10]:  # Limit to 10 anomalies to keep report concise
+            report_lines.append(
+                f"{anomaly['timestamp']:<24} | {anomaly['energy_output']:.1f} | {abs(anomaly['z_score']):.2f}σ"
+            )
+        if len(anomalies) > 10:
+            report_lines.append(f"... and {len(anomalies) - 10} more anomalies detected.")
+    else:
+        report_lines.append("No anomalies detected in the dataset.")
+    
+    report_lines.extend([
+        "",
+        "Visual Analytics",
+        "---------------",
+        "The following visualizations are included in the dashboard:",
+        "- Energy Output Over Time: Line chart showing energy production trends.",
+        "- Energy Output vs. Air Temperature: Scatter plot analyzing temperature impact.",
+        "- Energy Output vs. Relative Humidity: Scatter plot evaluating humidity effects.",
+        "- Solar Generation vs. Wind Speed: Dual-axis chart comparing energy output and wind speed.",
+        "",
+        "Note: For detailed visualizations, refer to the exported dashboard images.",
+        "",
+        "Generated by Rayfield Systems AI Analytics Platform"
+    ])
+    
+    return "\n".join(report_lines)
+
+# Mock analytics data for initial display
 mock_analytics = {
     'stats': {
         'max_output': 200.5,
@@ -149,6 +183,7 @@ mock_analytics = {
 }
 
 # --- Flask Routes ---
+
 @app.route('/', methods=['GET'])
 def home():
     return redirect(url_for('dashboard'))
@@ -156,7 +191,6 @@ def home():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        # Simple redirect for demo purposes; no actual validation
         return redirect(url_for('dashboard'))
     return render_template_string(login_template)
 
@@ -170,74 +204,47 @@ def upload():
             return jsonify({'error': 'No selected file'}), 400
         if file and allowed_file(file.filename):
             try:
-                # Read CSV directly from stream
                 df = pd.read_csv(io.StringIO(file.read().decode('utf-8')))
-                
-                # --- Apply data processing from your scripts ---
-                # Validate essential columns as per your CSV example
                 required_solar_cols = {'Timestamp', 'SolarGeneration'}
                 if not required_solar_cols.issubset(df.columns):
                     missing = required_solar_cols - set(df.columns)
-                    return jsonify({'error': f"Missing required columns in CSV: {', '.join(missing)}. Please ensure 'Timestamp' and 'SolarGeneration' are present."}), 400
-
+                    return jsonify({'error': f"Missing required columns in CSV: {', '.join(missing)}."}), 400
                 df = df.dropna(subset=["SolarGeneration", "Timestamp"]).copy()
-                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors='coerce') 
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors='coerce')
                 df = df.rename(columns={"SolarGeneration": "output_kwh", "Timestamp": "date"})
                 df = df.sort_values("date")
-                df.dropna(subset=['output_kwh', 'date'], inplace=True) # Ensure no NaNs after datetime conversion
-
-                # Had to average the 15-minute intervals to by the hour
+                df.dropna(subset=['output_kwh', 'date'], inplace=True)
                 df_hourly = df.set_index("date").resample("1H").mean().dropna().reset_index()
-
-                # --- Simulate weather data for plotting if not present ---
-                # This ensures all your desired plots can be generated
-                num_records = len(df_hourly)
-                # Ensure reproducibility for simulated data based on a seed or consistent pattern
-                np.random.seed(42) 
+                np.random.seed(42)
                 if 'AirTemperature' not in df_hourly.columns:
-                    df_hourly['AirTemperature'] = np.random.uniform(5, 35, num_records)
+                    df_hourly['AirTemperature'] = np.random.uniform(5, 35, len(df_hourly))
                 if 'RelativeHumidity' not in df_hourly.columns:
-                    df_hourly['RelativeHumidity'] = np.random.uniform(30, 100, num_records)
+                    df_hourly['RelativeHumidity'] = np.random.uniform(30, 100, len(df_hourly))
                 if 'WindSpeed' not in df_hourly.columns:
-                    df_hourly['WindSpeed'] = np.random.uniform(0, 15, num_records)
-                
-                # Anomaly detection
+                    df_hourly['WindSpeed'] = np.random.uniform(0, 15, len(df_hourly))
                 model_params = train_model(df_hourly)
                 df_hourly["anomaly"] = predict_anomalies(model_params, df_hourly)
-                # Store z_score for display in anomaly table
                 df_hourly['z_score'] = (df_hourly['output_kwh'] - model_params['mean']) / model_params['std']
-
-                # Generate summary
                 weekly_summary = generate_summary(df_hourly)
-
-                # Generate plots as base64 images and store in plot_image_cache
                 plots_keys = {}
-                
-                # Plot 1: Solar Generation Over Time
                 plot_id = str(uuid.uuid4())
                 plot_image_cache[plot_id] = generate_plot_base64(
                     df_hourly, 'line', 'date', 'output_kwh',
                     'Solar Energy Generation Over Time', 'Timestamp', 'Solar Generation (kWh)'
                 )
                 plots_keys['time_series_plot'] = plot_id
-
-                # Plot 2: Solar Generation vs Air Temperature
                 plot_id = str(uuid.uuid4())
                 plot_image_cache[plot_id] = generate_plot_base64(
                     df_hourly, 'scatter', 'AirTemperature', 'output_kwh',
                     'Solar Generation vs Air Temperature', 'Air Temperature (°C)', 'Solar Generation (kWh)'
                 )
                 plots_keys['temp_scatter_plot'] = plot_id
-                
-                # Plot 3: Solar Generation vs Relative Humidity
                 plot_id = str(uuid.uuid4())
                 plot_image_cache[plot_id] = generate_plot_base64(
                     df_hourly, 'scatter', 'RelativeHumidity', 'output_kwh',
                     'Solar Generation vs Relative Humidity', 'Relative Humidity (%)', 'Solar Generation (kWh)'
                 )
                 plots_keys['humidity_scatter_plot'] = plot_id
-
-                # Plot 4: Dual-axis Plot for Wind Speed and Solar Generation
                 plot_id = str(uuid.uuid4())
                 plot_image_cache[plot_id] = generate_plot_base64(
                     df_hourly, 'dual_axis', 'date', 'output_kwh',
@@ -245,19 +252,14 @@ def upload():
                     'WindSpeed', 'Wind Speed (m/s)'
                 )
                 plots_keys['wind_dual_axis_plot'] = plot_id
-
-                # Anomalies data for dashboard table
                 anomalies_for_display = df_hourly[df_hourly['anomaly']].to_dict(orient='records')
-                # Format for display (Timestamp, energy_output, deviation)
-                formatted_anomalies = []
-                for a in anomalies_for_display:
-                    formatted_anomalies.append({
+                formatted_anomalies = [
+                    {
                         'timestamp': a['date'].strftime('%Y-%m-%d %H:%M:%S'),
                         'energy_output': a['output_kwh'],
-                        'z_score': a.get('z_score', 0) # Use actual z_score if available
-                    })
-                
-                # Update session with *keys* to processed data for dashboard display
+                        'z_score': a.get('z_score', 0)
+                    } for a in anomalies_for_display
+                ]
                 session['processed_data_keys'] = {
                     'plot_ids': plots_keys,
                     'summary': weekly_summary,
@@ -270,41 +272,31 @@ def upload():
                     },
                     'anomalies': formatted_anomalies
                 }
-                
                 return jsonify({'redirect': url_for('dashboard')})
-
             except Exception as e:
-                # Log the exception for debugging
                 app.logger.error(f"Error processing file: {e}")
                 return jsonify({'error': f"Error processing file: {e}"}), 500
         else:
             return jsonify({'error': 'Invalid file type. Please upload a CSV file.'}), 400
-    
     return render_template_string(upload_template, name="Sarah Johnson")
 
 @app.route('/dashboard')
 def dashboard():
-    # Retrieve processed data *keys* from session
     processed_data_keys = session.get('processed_data_keys', None)
-
-    # Initialize analytics_to_display with placeholders
     analytics_to_display = {
         'stats': mock_analytics['stats'],
         'anomalies': mock_analytics['anomalies'],
-        'time_series_plot': None, 
+        'time_series_plot': None,
         'temp_scatter_plot': None,
         'humidity_scatter_plot': None,
         'wind_dual_axis_plot': None,
     }
     summary_text = "Upload your data to see real-time analytics and anomaly detection!"
-
     if processed_data_keys:
-        # Retrieve actual plot data from plot_image_cache using keys
         retrieved_plots = {}
         for plot_name, plot_id in processed_data_keys['plot_ids'].items():
             if plot_id in plot_image_cache:
-                retrieved_plots[plot_name] = plot_image_cache[plot_id] # Do NOT pop here
-        
+                retrieved_plots[plot_name] = plot_image_cache[plot_id]
         analytics_to_display = {
             'stats': processed_data_keys['stats'],
             'anomalies': processed_data_keys['anomalies'],
@@ -315,7 +307,6 @@ def dashboard():
         }
         summary_text = processed_data_keys['summary']
     else:
-        # Generate mock plots dynamically for initial display if no data uploaded
         mock_df_plot = pd.DataFrame({
             'date': pd.to_datetime(pd.date_range(start='2023-01-01', periods=24, freq='H')),
             'output_kwh': np.random.uniform(100, 200, 24),
@@ -323,7 +314,6 @@ def dashboard():
             'RelativeHumidity': np.random.uniform(40, 90, 24),
             'WindSpeed': np.random.uniform(0, 10, 24)
         })
-
         analytics_to_display['time_series_plot'] = generate_plot_base64(
             mock_df_plot, 'line', 'date', 'output_kwh',
             'Energy Output Over Time (Mock)', 'Time', 'Energy Output (kWh)'
@@ -341,9 +331,8 @@ def dashboard():
             'Energy Output vs Wind Speed (Mock)', 'Time', 'Energy Output (kWh)',
             'WindSpeed', 'Wind Speed (m/s)'
         )
-
     return render_template_string(
-        dashboard_template, 
+        dashboard_template,
         name="Sarah Johnson",
         company="Rayfield Systems",
         role="Energy Analyst",
@@ -351,50 +340,65 @@ def dashboard():
         summary_text=summary_text
     )
 
+@app.route('/reports')
+def reports():
+    processed_data_keys = session.get('processed_data_keys', None)
+    report_text = generate_report_text(processed_data_keys)
+    has_data = processed_data_keys is not None and bool(processed_data_keys.get('plot_ids', {}))
+    return render_template_string(
+        report_template,
+        name="Sarah Johnson",
+        report_text=report_text,
+        has_data=has_data
+    )
+
+@app.route('/download_report')
+def download_report():
+    processed_data_keys = session.get('processed_data_keys', None)
+    report_text = generate_report_text(processed_data_keys)
+    buffer = io.StringIO(report_text)
+    buffer.seek(0)
+    return send_file(
+        io.BytesIO(buffer.getvalue().encode('utf-8')),
+        mimetype='text/plain',
+        as_attachment=True,
+        download_name=f"energy_analytics_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    )
+
 @app.route('/logout')
 def logout():
-    # Clear session data and any corresponding plot cache entries
     if 'processed_data_keys' in session:
         for plot_id in session['processed_data_keys']['plot_ids'].values():
-            plot_image_cache.pop(plot_id, None) # Remove from cache if still there
-        session.pop('processed_data_keys', None) 
+            plot_image_cache.pop(plot_id, None)
+        session.pop('processed_data_keys', None)
     return redirect(url_for('login'))
 
 @app.route('/export', methods=['GET'])
 def export_dashboard():
-    # Show a page with a download button for dashboard visuals
     processed_data_keys = session.get('processed_data_keys', None)
     has_data = processed_data_keys is not None and bool(processed_data_keys.get('plot_ids', {}))
     return render_template_string(export_template, has_data=has_data)
 
 @app.route('/download_visuals', methods=['GET'])
 def download_visuals():
-    # Export all dashboard images as a zip file
     import zipfile
-    from flask import send_file
-    from io import BytesIO
-
     processed_data_keys = session.get('processed_data_keys', None)
     if not processed_data_keys or not processed_data_keys.get('plot_ids', {}):
         return "No dashboard data to export. Please upload and analyze data first.", 400
-
-    # Collect images from cache
     image_files = []
     for plot_name, plot_id in processed_data_keys['plot_ids'].items():
         img_data = plot_image_cache.get(plot_id)
         if img_data:
             img_bytes = base64.b64decode(img_data)
             image_files.append((f"{plot_name}.png", img_bytes))
-
-    # Create zip in memory
-    zip_buffer = BytesIO()
+    zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w') as zf:
         for fname, fbytes in image_files:
             zf.writestr(fname, fbytes)
     zip_buffer.seek(0)
     return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='dashboard_visuals.zip')
 
-# HTML Templates as strings
+# HTML Templates
 login_template = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -509,12 +513,10 @@ login_template = '''
             <h1>Rayfield Energy Automation</h1>
             <p>AI-powered energy workflow solutions</p>
         </div>
-        
         <div class="form-container">
             <div class="demo-note">
                 UI Demo Mode - Click Login to Continue
             </div>
-            
             <form method="POST">
                 <div class="form-group">
                     <label for="email">Email</label>
@@ -527,7 +529,6 @@ login_template = '''
                 <button type="submit" class="btn">Login</button>
             </form>
         </div>
-        
         <div class="footer">
             &copy; 2023 Rayfield Systems. All rights reserved.
         </div>
@@ -648,12 +649,6 @@ upload_template = '''
         .form-group { 
             margin-bottom: 20px; 
         }
-        .form-group label { 
-            display: block; 
-            margin-bottom: 10px; 
-            font-weight: 500; 
-            color: #2c3e50; 
-        }
         .form-group input[type="file"] {
             padding: 10px;
             border: 1px solid #ddd;
@@ -736,39 +731,29 @@ upload_template = '''
             const loadingOverlay = document.querySelector('.loading-overlay');
             const uploadBtn = document.querySelector('#uploadBtn');
             const fileInput = document.querySelector('input[name="csv_file"]');
-
             form.addEventListener('submit', async function(event) {
                 event.preventDefault();
-                
-                // Validate file selection
                 if (!fileInput.files.length) {
                     alert('Please select a CSV file to upload.');
                     return;
                 }
-
-                // Show loading screen and disable button
                 loadingOverlay.style.display = 'flex';
                 uploadBtn.disabled = true;
-
                 try {
                     const formData = new FormData(form);
                     const response = await fetch('{{ url_for("upload") }}', {
                         method: 'POST',
                         body: formData
                     });
-                    
                     const result = await response.json();
-                    
                     if (response.ok && result.redirect) {
                         window.location.href = result.redirect;
                     } else {
-                        // Hide loading screen and re-enable button on error
                         loadingOverlay.style.display = 'none';
                         uploadBtn.disabled = false;
                         alert(result.error || 'An error occurred during upload.');
                     }
                 } catch (error) {
-                    // Handle network or other errors
                     loadingOverlay.style.display = 'none';
                     uploadBtn.disabled = false;
                     alert('Upload failed: ' + error.message);
@@ -792,27 +777,22 @@ upload_template = '''
                 <div class="role">Operations Analyst</div>
             </div>
         </div>
-        
         <div class="nav">
             <a href="{{ url_for('dashboard') }}">Dashboard</a>
             <a href="{{ url_for('upload') }}" class="active">Upload Data</a>
             <a href="{{ url_for('export_dashboard') }}">Export</a>
-            <a href="#">Reports</a>
+            <a href="{{ url_for('reports') }}">Reports</a>
             <a href="{{ url_for('logout') }}" style="margin-left: auto;">Logout</a>
         </div>
-        
         <div class="content">
             <h2 class="page-title">Upload Energy Data</h2>
-            
             <div class="demo-note">
                 Upload your Solar Energy Generation CSV to view real-time analytics.
             </div>
-            
             <div class="upload-card">
                 <div class="upload-icon">📊</div>
                 <h2>Upload Your Energy Data CSV</h2>
                 <p>Analyze energy production, efficiency, and detect anomalies</p>
-                
                 <form id="uploadForm" enctype="multipart/form-data" style="margin-top: 30px;">
                     <div class="form-group">
                         <input type="file" name="csv_file" accept=".csv" required>
@@ -820,7 +800,6 @@ upload_template = '''
                     <button type="submit" id="uploadBtn" class="btn">Upload & Analyze</button>
                 </form>
             </div>
-            
             <div class="instructions">
                 <h3>Data Format Requirements</h3>
                 <ul>
@@ -830,7 +809,6 @@ upload_template = '''
                     <li>Maximum file size: 10MB</li>
                 </ul>
             </div>
-
             <div class="loading-overlay">
                 <div style="text-align: center;">
                     <div class="loading-spinner"></div>
@@ -838,7 +816,6 @@ upload_template = '''
                 </div>
             </div>
         </div>
-        
         <div class="footer">
             &copy; 2023 Rayfield Systems. All rights reserved. | AI-powered Energy Automation
         </div>
@@ -1074,20 +1051,17 @@ dashboard_template = '''
                 <div class="role">{{ role }}</div>
             </div>
         </div>
-        
         <div class="nav">
             <a href="{{ url_for('dashboard') }}" class="active">Dashboard</a>
             <a href="{{ url_for('upload') }}">Upload Data</a>
             <a href="{{ url_for('export_dashboard') }}">Export</a>
-            <a href="#">Reports</a>
+            <a href="{{ url_for('reports') }}">Reports</a>
             <a href="{{ url_for('logout') }}" style="margin-left: auto;">Logout</a>
         </div>
-        
         <div class="content">
             <div class="demo-note">
                 Displaying analytics based on uploaded data (or mock data if no upload).
             </div>
-            
             <div class="page-title">
                 <h2>Energy Production Dashboard</h2>
                 <div>
@@ -1095,11 +1069,9 @@ dashboard_template = '''
                     <a href="{{ url_for('export_dashboard') }}" class="btn" style="margin-left: 10px;">Export Dashboard</a>
                 </div>
             </div>
-
             <div class="summary-box">
                 <strong>Weekly Summary:</strong> {{ summary_text }}
             </div>
-            
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="label">Max Output</div>
@@ -1118,7 +1090,6 @@ dashboard_template = '''
                     <div class="value">{{ "%.1f"|format(analytics.stats.total_output) }} kWh</div>
                 </div>
             </div>
-            
             <div class="dashboard-grid">
                 <div class="card">
                     <div class="card-header">
@@ -1132,7 +1103,6 @@ dashboard_template = '''
                         {% endif %}
                     </div>
                 </div>
-                
                 <div class="card">
                     <div class="card-header">
                         <h3>Energy Output vs. Air Temperature</h3>
@@ -1145,7 +1115,6 @@ dashboard_template = '''
                         {% endif %}
                     </div>
                 </div>
-                
                 <div class="card">
                     <div class="card-header">
                         <h3>Energy Output vs. Relative Humidity</h3>
@@ -1158,7 +1127,6 @@ dashboard_template = '''
                         {% endif %}
                     </div>
                 </div>
-
                 <div class="card">
                     <div class="card-header">
                         <h3>Solar Generation vs Wind Speed Over Time</h3>
@@ -1171,7 +1139,6 @@ dashboard_template = '''
                         {% endif %}
                     </div>
                 </div>
-                
                 <div class="card full-width">
                     <div class="card-header">
                         <h3>Detected Anomalies</h3>
@@ -1202,7 +1169,6 @@ dashboard_template = '''
                 </div>
             </div>
         </div>
-        
         <div class="footer">
             &copy; 2023 Rayfield Systems. All rights reserved. | AI-powered Energy Automation
         </div>
@@ -1244,7 +1210,7 @@ export_template = '''
             <a href="{{ url_for('dashboard') }}">Dashboard</a>
             <a href="{{ url_for('upload') }}">Upload Data</a>
             <a href="{{ url_for('export_dashboard') }}" class="active">Export</a>
-            <a href="#">Reports</a>
+            <a href="{{ url_for('reports') }}">Reports</a>
             <a href="{{ url_for('logout') }}" style="margin-left: auto;">Logout</a>
         </div>
         <div class="content">
@@ -1260,6 +1226,186 @@ export_template = '''
             {% else %}
                 <a href="{{ url_for('upload') }}" class="btn">Upload Data</a>
             {% endif %}
+        </div>
+        <div class="footer">
+            &copy; 2023 Rayfield Systems. All rights reserved. | AI-powered Energy Automation
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+report_template = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Energy Analytics Report | Rayfield Systems</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { 
+            font-family: 'Roboto', sans-serif; 
+            background: linear-gradient(135deg, #1a2a6c, #2c3e50); 
+            min-height: 100vh; 
+            padding: 20px; 
+        }
+        .container { 
+            max-width: 900px; 
+            margin: 0 auto; 
+            background: #fff; 
+            border-radius: 12px; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1); 
+            overflow: hidden; 
+        }
+        .header { 
+            background: linear-gradient(90deg, #00b09b, #96c93d); 
+            color: white; 
+            padding: 20px; 
+            border-radius: 12px 12px 0 0; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
+        .logo { 
+            font-size: 32px; 
+            display: flex; 
+            align-items: center; 
+        }
+        .logo span { 
+            margin-right: 15px; 
+        }
+        .user-info { 
+            text-align: right; 
+        }
+        .user-info .name { 
+            font-size: 18px; 
+            font-weight: 500; 
+        }
+        .user-info .role { 
+            font-size: 14px; 
+            opacity: 0.9; 
+        }
+        .nav { 
+            background-color: #2c3e50; 
+            padding: 0 20px; 
+            display: flex; 
+        }
+        .nav a { 
+            color: white; 
+            text-decoration: none; 
+            padding: 15px 20px; 
+            display: block; 
+            transition: background 0.3s; 
+        }
+        .nav a:hover { 
+            background-color: #1a2a6c; 
+        }
+        .nav a.active { 
+            background: linear-gradient(90deg, #00b09b, #96c93d); 
+            font-weight: 500; 
+        }
+        .content { 
+            padding: 30px; 
+            background: white; 
+            border-radius: 0 0 12px 12px; 
+        }
+        .page-title { 
+            color: #2c3e50; 
+            margin-bottom: 20px; 
+            padding-bottom: 10px; 
+            border-bottom: 2px solid #00b09b; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
+        .btn { 
+            padding: 12px 30px; 
+            background: linear-gradient(90deg, #00b09b, #96c93d); 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            font-size: 16px; 
+            font-weight: 500; 
+            cursor: pointer; 
+            transition: all 0.3s; 
+            text-decoration: none; 
+            display: inline-block; 
+        }
+        .btn:hover { 
+            transform: translateY(-2px); 
+            box-shadow: 0 4px 15px rgba(0,176,155,0.3); 
+        }
+        .report-content { 
+            background: #f8f9fa; 
+            padding: 20px; 
+            border-radius: 8px; 
+            white-space: pre-wrap; 
+            font-family: 'Courier New', monospace; 
+            font-size: 14px; 
+            line-height: 1.6; 
+            max-height: 500px; 
+            overflow-y: auto; 
+            border: 1px solid #ddd; 
+        }
+        .demo-note { 
+            background-color: #e8f4f3; 
+            color: #00b09b; 
+            padding: 15px; 
+            margin-bottom: 20px; 
+            border-radius: 6px; 
+            text-align: center; 
+            font-size: 14px; 
+            font-weight: 500; 
+        }
+        .footer { 
+            text-align: center; 
+            padding: 20px 0; 
+            color: #7f8c8d; 
+            font-size: 14px; 
+            margin-top: 30px; 
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">
+                <span>⚡</span>
+                <div>
+                    <h1>Rayfield Energy Automation</h1>
+                    <p>AI-powered energy workflow solutions</p>
+                </div>
+            </div>
+            <div class="user-info">
+                <div class="name">{{ name }}</div>
+                <div class="role">Energy Analyst</div>
+            </div>
+        </div>
+        <div class="nav">
+            <a href="{{ url_for('dashboard') }}">Dashboard</a>
+            <a href="{{ url_for('upload') }}">Upload Data</a>
+            <a href="{{ url_for('export_dashboard') }}">Export</a>
+            <a href="{{ url_for('reports') }}" class="active">Reports</a>
+            <a href="{{ url_for('logout') }}" style="margin-left: auto;">Logout</a>
+        </div>
+        <div class="content">
+            <div class="page-title">
+                <h2>Energy Analytics Report</h2>
+                {% if has_data %}
+                <a href="{{ url_for('download_report') }}" class="btn">Download Report</a>
+                {% endif %}
+            </div>
+            <div class="demo-note">
+                {% if has_data %}
+                Review the generated report below. Click 'Download Report' to save as a text file.
+                {% else %}
+                No data uploaded. Please upload a CSV file to generate a report.
+                {% endif %}
+            </div>
+            <div class="report-content">
+                {{ report_text }}
+            </div>
         </div>
         <div class="footer">
             &copy; 2023 Rayfield Systems. All rights reserved. | AI-powered Energy Automation
